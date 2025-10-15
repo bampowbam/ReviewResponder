@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import ReviewDashboard from './components/ReviewDashboard';
 import AIResponseGenerator from './components/AIResponseGenerator';
 import ReviewAnalytics from './components/ReviewAnalytics';
 import SettingsPanel from './components/SettingsPanel';
+import automationService from './services/automationService';
 import './App.css';
 
 function App() {
@@ -21,6 +22,26 @@ function App() {
       values: 'Customer satisfaction and quality service'
     }
   });
+
+  // Handle automation service when autoRespond changes
+  useEffect(() => {
+    if (aiSettings.autoRespond) {
+      console.log('🤖 Starting AI automation service...');
+      automationService.start(aiSettings);
+    } else {
+      console.log('🛑 Stopping AI automation service...');
+      automationService.stop();
+    }
+
+    // Cleanup on unmount
+    return () => {
+      automationService.stop();
+    };
+  }, [aiSettings.autoRespond, aiSettings]);
+
+  const handleSettingsChange = (newSettings) => {
+    setAiSettings(newSettings);
+  };
 
   const addAIResponse = (reviewId, response) => {
     setReviews(prevReviews =>
@@ -55,8 +76,12 @@ function App() {
               </div>
             </div>
             <div className="flex items-center space-x-4">
-              <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                AI Ready
+              <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${
+                aiSettings.autoRespond 
+                  ? 'bg-green-100 text-green-800' 
+                  : 'bg-blue-100 text-blue-800'
+              }`}>
+                {aiSettings.autoRespond ? '🤖 Auto-Responding Active' : 'AI Ready'}
               </span>
               <button 
                 onClick={handleConnectGoogle}
@@ -175,7 +200,7 @@ function App() {
           <ReviewAnalytics reviews={reviews} />
         )}
         {activeTab === 'settings' && (
-          <SettingsPanel aiSettings={aiSettings} setAiSettings={setAiSettings} />
+          <SettingsPanel aiSettings={aiSettings} setAiSettings={handleSettingsChange} />
         )}
       </main>
     </div>
