@@ -3,13 +3,20 @@ import ReviewDashboard from './components/ReviewDashboard';
 import AIResponseGenerator from './components/AIResponseGenerator';
 import ReviewAnalytics from './components/ReviewAnalytics';
 import SettingsPanel from './components/SettingsPanel';
+import CredentialsModal from './components/CredentialsModal';
 import automationService from './services/automationService';
+import credentialsService from './services/credentialsService';
 import './App.css';
 
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [reviews, setReviews] = useState([]);
   const [showConnectModal, setShowConnectModal] = useState(false);
+  const [credentialsStatus, setCredentialsStatus] = useState({
+    googleConfigured: false,
+    openaiConfigured: false,
+    isConfigured: false
+  });
 
   const [aiSettings, setAiSettings] = useState({
     tone: 'professional',
@@ -23,21 +30,51 @@ function App() {
     }
   });
 
+  // Check credentials status on mount
+  useEffect(() => {
+    checkCredentialsStatus();
+  }, []);
+
+  const checkCredentialsStatus = async () => {
+    try {
+      const status = await credentialsService.getStatus();
+      setCredentialsStatus(status);
+    } catch (error) {
+      console.error('Error checking credentials status:', error);
+    }
+  };
+
   // Handle automation service when autoRespond changes
   useEffect(() => {
-    if (aiSettings.autoRespond) {
-      console.log('🤖 Starting AI automation service...');
-      automationService.start(aiSettings);
-    } else {
-      console.log('🛑 Stopping AI automation service...');
-      automationService.stop();
-    }
-
-    // Cleanup on unmount
-    return () => {
-      automationService.stop();
+    let isCancelled = false;
+    
+    const handleAutomation = async () => {
+      try {
+        if (isCancelled) return;
+        
+        if (aiSettings.autoRespond) {
+          console.log('🤖 Starting AI automation service...');
+          await automationService.start(aiSettings);
+        } else {
+          console.log('🛑 Stopping AI automation service...');
+          await automationService.stop();
+        }
+      } catch (error) {
+        console.error('Error managing automation service:', error);
+      }
     };
-  }, [aiSettings.autoRespond, aiSettings]);
+
+    handleAutomation();
+
+    // Cleanup function
+    return () => {
+      isCancelled = true;
+      // Only stop on component unmount, not on setting changes
+      if (!aiSettings.autoRespond) {
+        automationService.stop().catch(console.error);
+      }
+    };
+  }, [aiSettings.autoRespond]); // Remove aiSettings from dependencies to prevent unnecessary restarts
 
   const handleSettingsChange = (newSettings) => {
     setAiSettings(newSettings);
@@ -55,6 +92,10 @@ function App() {
 
   const handleConnectGoogle = () => {
     setShowConnectModal(true);
+  };
+
+  const handleCredentialsSuccess = () => {
+    checkCredentialsStatus();
   };
 
   return (
@@ -77,17 +118,26 @@ function App() {
             </div>
             <div className="flex items-center space-x-4">
               <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${
-                aiSettings.autoRespond 
-                  ? 'bg-green-100 text-green-800' 
-                  : 'bg-blue-100 text-blue-800'
+                credentialsStatus.isConfigured
+                  ? aiSettings.autoRespond 
+                    ? 'bg-green-100 text-green-800' 
+                    : 'bg-blue-100 text-blue-800'
+                  : 'bg-yellow-100 text-yellow-800'
               }`}>
-                {aiSettings.autoRespond ? '🤖 Auto-Responding Active' : 'AI Ready'}
+                {credentialsStatus.isConfigured
+                  ? aiSettings.autoRespond ? '🤖 Auto-Responding Active' : 'AI Ready'
+                  : '⚙️ Setup Required'
+                }
               </span>
               <button 
                 onClick={handleConnectGoogle}
-                className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                className={`px-4 py-2 rounded-lg transition-colors ${
+                  credentialsStatus.isConfigured
+                    ? 'bg-green-600 text-white hover:bg-green-700'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                }`}
               >
-                Connect Google Business
+                {credentialsStatus.isConfigured ? '✓ Connected' : 'Connect Google Business'}
               </button>
             </div>
           </div>
@@ -95,63 +145,11 @@ function App() {
       </header>
 
       {/* Connect Google Business Modal */}
-      {showConnectModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-8 max-w-md w-full mx-4">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-bold text-gray-900">Connect Google My Business</h2>
-              <button 
-                onClick={() => setShowConnectModal(false)}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            
-            <div className="space-y-4">
-              <p className="text-gray-600">
-                To connect your Google My Business account and start managing reviews with AI:
-              </p>
-              
-              <div className="bg-blue-50 p-4 rounded-lg">
-                <h3 className="font-semibold text-blue-900 mb-2">Setup Instructions:</h3>
-                <ol className="text-sm text-blue-800 space-y-1 list-decimal list-inside">
-                  <li>Go to Google Cloud Console</li>
-                  <li>Create a new project or select existing</li>
-                  <li>Enable Google My Business API</li>
-                  <li>Create OAuth 2.0 credentials</li>
-                  <li>Add your API keys to the .env file</li>
-                </ol>
-              </div>
-              
-              <div className="bg-yellow-50 p-4 rounded-lg">
-                <h3 className="font-semibold text-yellow-900 mb-2">Environment Variables:</h3>
-                <div className="text-xs text-yellow-800 font-mono bg-yellow-100 p-2 rounded">
-                  VITE_GOOGLE_CLIENT_ID=your_client_id<br/>
-                  VITE_OPENAI_API_KEY=your_openai_key
-                </div>
-              </div>
-              
-              <div className="flex space-x-3 pt-4">
-                <button
-                  onClick={() => window.open('https://console.cloud.google.com/', '_blank')}
-                  className="flex-1 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
-                >
-                  Open Google Cloud Console
-                </button>
-                <button
-                  onClick={() => setShowConnectModal(false)}
-                  className="flex-1 border border-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-50 transition-colors"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <CredentialsModal
+        isOpen={showConnectModal}
+        onClose={() => setShowConnectModal(false)}
+        onSuccess={handleCredentialsSuccess}
+      />
 
       {/* Navigation */}
       <nav className="bg-white border-b">

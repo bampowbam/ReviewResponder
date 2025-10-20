@@ -1,10 +1,98 @@
-const axios = require('axios');
+const OpenAI = require('openai');
+const googleMyBusinessService = require('./googleMyBusinessService');
+const credentialsRoutes = require('../routes/credentials');
 const webhookService = require('./webhookService');
 
-class BackendAutomationService {
+class AutomationService {
   constructor() {
-    this.processedReviews = new Set();
-    this.isProcessing = false;
+    this.isRunning = false;
+    this.intervalId = null;
+    this.openai = null;
+    this.checkInterval = 5 * 60 * 1000; // Check every 5 minutes
+    this.processedReviews = new Set(); // Track processed reviews
+    this.settings = {
+      autoRespond: false,
+      tone: 'professional',
+      language: 'english',
+      responseTemplate: 'personalized',
+      businessInfo: {
+        name: 'Your Business',
+        type: 'Business',
+        values: 'Customer satisfaction and quality service'
+      }
+    };
+  }
+
+  // Initialize OpenAI client
+  initializeOpenAI() {
+    try {
+      const credentials = credentialsRoutes.getCredentials();
+      if (credentials.openaiApiKey) {
+        this.openai = new OpenAI({
+          apiKey: credentials.openaiApiKey
+        });
+        console.log('✅ OpenAI client initialized for automation');
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error('❌ Error initializing OpenAI:', error);
+      return false;
+    }
+  }
+
+  // Start the automation service
+  async start(settings = {}) {
+    try {
+      if (this.isRunning) {
+        console.log('🤖 Automation service is already running');
+        return;
+      }
+
+      // Update settings
+      this.settings = { ...this.settings, ...settings };
+
+      // Initialize OpenAI
+      if (!this.initializeOpenAI()) {
+        throw new Error('Failed to initialize OpenAI client');
+      }
+
+      // Check if Google service is authenticated
+      if (!googleMyBusinessService.isAuth()) {
+        console.log('⚠️ Google My Business not authenticated. Auto-responses will be queued.');
+      }
+
+      this.isRunning = true;
+      
+      // Start periodic review checking
+      this.intervalId = setInterval(() => {
+        this.checkForNewReviews();
+      }, this.checkInterval);
+
+      console.log(`🚀 Automation service started - checking every ${this.checkInterval / 1000}s`);
+      console.log(`📋 Settings:`, {
+        autoRespond: this.settings.autoRespond,
+        tone: this.settings.tone,
+        template: this.settings.responseTemplate
+      });
+
+      // Do initial check
+      this.checkForNewReviews();
+
+    } catch (error) {
+      console.error('❌ Error starting automation service:', error);
+      this.isRunning = false;
+    }
+  }
+
+  // Stop the automation service
+  stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+    this.isRunning = false;
+    console.log('🛑 Automation service stopped');
   }
 
   // Process review received via webhook (real-time)
@@ -23,71 +111,134 @@ class BackendAutomationService {
 
       // Mark as processing
       this.processedReviews.add(reviewData.name);
-      this.isProcessing = true;
 
-      // Calculate urgency
-      const reviewTime = new Date(reviewData.createTime);
-      const now = new Date();
-      const timeSinceReview = now - reviewTime;
-      const minutesSince = Math.round(timeSinceReview / 60000);
-      
-      console.log(`⏰ Review posted ${minutesSince} minutes ago`);
-
-      // Send urgent notification if needed
-      if (minutesSince > 8) {
-        console.log('🚨 URGENT: Less than 2 minutes to respond!');
-        await webhookService.sendUrgentNotification(reviewData);
+      // Check if we should auto-respond
+      if (this.settings.autoRespond && this.shouldAutoRespond(reviewData)) {
+        await this.generateAndPostResponse(reviewData);
       }
-
-      // Generate AI response immediately for webhook reviews
-      await this.generateAndSendResponse(reviewData);
 
     } catch (error) {
       console.error('❌ Error processing webhook review:', error);
-    } finally {
-      this.isProcessing = false;
     }
   }
 
-  // Generate AI response and post to Google
-  async generateAndSendResponse(reviewData) {
-    try {
-      console.log('🤖 Generating AI response...');
-      
-      // Transform review for AI service
-      const transformedReview = {
-        id: reviewData.name,
-        rating: reviewData.starRating || 0,
-        text: reviewData.comment || '',
-        reviewerName: reviewData.reviewer?.displayName || 'Valued Customer'
-      };
+  // Check for new reviews across all locations
+  async checkForNewReviews() {
+    if (!this.settings.autoRespond) {
+      return;
+    }
 
-      // Call frontend AI service via API
-      const aiResponse = await this.callAIService(transformedReview);
+    try {
+      console.log('🔍 Checking for new reviews...');
+
+      if (!googleMyBusinessService.isAuth()) {
+        console.log('⚠️ Google service not authenticated, skipping review check');
+        return;
+      }
+
+      // Get all business accounts
+      const accounts = await googleMyBusinessService.getAccounts();
       
-      if (aiResponse.success) {
-        console.log('✅ AI response generated successfully');
-        console.log(`💬 Response: "${aiResponse.response.substring(0, 100)}..."`);
+      for (const account of accounts) {
+        // Get locations for each account
+        const locations = await googleMyBusinessService.getLocations(account.name);
         
-        // Post response to Google My Business
-        await this.postResponseToGoogle(reviewData.name, aiResponse.response);
-        
-        // Notify frontend of successful automation
-        await webhookService.notifyFrontend('automation_success', {
-          reviewId: reviewData.name,
-          reviewRating: reviewData.starRating,
-          reviewerName: reviewData.reviewer?.displayName,
-          aiResponse: aiResponse.response,
-          processingTime: Date.now() - new Date(reviewData.createTime).getTime(),
-          confidence: aiResponse.confidence
-        });
-        
-      } else {
-        throw new Error(aiResponse.error || 'AI response generation failed');
+        for (const location of locations) {
+          await this.processLocationReviews(location);
+        }
       }
 
     } catch (error) {
-      console.error('❌ Error generating/sending response:', error);
+      console.error('❌ Error checking for new reviews:', error);
+    }
+  }
+
+  // Process reviews for a specific location
+  async processLocationReviews(location) {
+    try {
+      const reviews = await googleMyBusinessService.getReviews(location.name);
+      
+      for (const review of reviews) {
+        // Skip if already processed
+        if (this.processedReviews.has(review.name)) {
+          continue;
+        }
+
+        // Skip if review already has a reply
+        if (review.reply) {
+          this.processedReviews.add(review.name);
+          continue;
+        }
+
+        // Check if we should auto-respond to this review
+        if (this.shouldAutoRespond(review)) {
+          await this.generateAndPostResponse(review, location);
+        }
+
+        // Mark as processed
+        this.processedReviews.add(review.name);
+      }
+
+    } catch (error) {
+      console.error(`❌ Error processing reviews for location ${location.name}:`, error);
+    }
+  }
+
+  // Determine if we should auto-respond to a review
+  shouldAutoRespond(review) {
+    // Auto-respond to 4-5 star reviews, or all if configured
+    const rating = review.starRating;
+    
+    // Always respond to 5-star reviews
+    if (rating === 5) return true;
+    
+    // Respond to 4-star reviews if configured
+    if (rating === 4 && this.settings.respondToFourStar) return true;
+    
+    // Respond to lower ratings if configured (for damage control)
+    if (rating <= 3 && this.settings.respondToLowRatings) return true;
+    
+    return false;
+  }
+
+  // Generate AI response and post it
+  async generateAndPostResponse(reviewData, location = null) {
+    try {
+      console.log(`🤖 Generating response for review: ${reviewData.name}`);
+
+      // Generate AI response
+      const responseText = await this.generateAIResponse(reviewData, location);
+      
+      if (!responseText) {
+        console.log('❌ Failed to generate response');
+        return;
+      }
+
+      // Post response to Google
+      await googleMyBusinessService.replyToReview(reviewData.name, responseText);
+      
+      console.log(`✅ Successfully posted auto-response to review: ${reviewData.name}`);
+
+      // Notify frontend of successful automation
+      await webhookService.notifyFrontend('automation_success', {
+        reviewId: reviewData.name,
+        reviewRating: reviewData.starRating,
+        reviewerName: reviewData.reviewer?.displayName,
+        aiResponse: responseText,
+        processingTime: Date.now() - new Date(reviewData.createTime || new Date()).getTime()
+      });
+
+      // Log the activity
+      this.logActivity({
+        type: 'auto_response',
+        reviewId: reviewData.name,
+        rating: reviewData.starRating,
+        response: responseText,
+        timestamp: new Date().toISOString()
+      });
+
+    } catch (error) {
+      console.error(`❌ Error generating/posting response for review ${reviewData.name}:`, error);
       
       // Notify frontend of automation failure
       await webhookService.notifyFrontend('automation_error', {
@@ -98,131 +249,75 @@ class BackendAutomationService {
     }
   }
 
-  // Call AI service to generate response
-  async callAIService(reviewData) {
+  // Generate AI response using OpenAI
+  async generateAIResponse(review, location) {
     try {
-      // In production, this would call your AI service API
-      // For now, simulate the AI response generation
+      if (!this.openai) {
+        throw new Error('OpenAI client not initialized');
+      }
+
+      const prompt = this.buildPrompt(review, location);
       
-      const prompt = this.createAIPrompt(reviewData);
-      
-      // Call OpenAI API directly
-      const openaiResponse = await this.callOpenAI(prompt);
-      
-      return {
-        success: true,
-        response: openaiResponse,
-        confidence: 0.85
-      };
-      
-    } catch (error) {
-      console.error('❌ AI service call failed:', error);
-      
-      // Return fallback response
-      return {
-        success: false,
-        error: error.message,
-        fallbackResponse: this.getFallbackResponse(reviewData.rating)
-      };
-    }
-  }
-
-  // Create AI prompt for review response
-  createAIPrompt(reviewData) {
-    const rating = reviewData.rating;
-    const text = reviewData.text;
-    const reviewerName = reviewData.reviewerName;
-    const businessName = process.env.BUSINESS_NAME || 'Our Business';
-    
-    const ratingContext = rating >= 4 ? 'positive' : rating === 3 ? 'neutral' : 'negative';
-    
-    return `Write a professional response to this ${ratingContext} Google review for ${businessName}:
-
-Review Rating: ${rating}/5 stars
-Reviewer: ${reviewerName}
-Review Text: "${text}"
-
-Response Guidelines:
-- Thank the reviewer by name if provided
-- ${this.getResponseStrategy(rating)}
-- Be authentic and avoid generic corporate language
-- Keep under 150 words
-- End with an appropriate closing
-
-Response:`;
-  }
-
-  // Get response strategy based on rating
-  getResponseStrategy(rating) {
-    const strategies = {
-      5: 'Express genuine gratitude and enthusiasm for their positive experience',
-      4: 'Thank them warmly and show appreciation for their positive feedback',
-      3: 'Acknowledge their feedback professionally and show commitment to improvement',
-      2: 'Apologize for their disappointing experience and offer to make improvements',
-      1: 'Sincerely apologize and actively offer to resolve their concerns directly'
-    };
-    
-    return strategies[rating] || strategies[3];
-  }
-
-  // Call OpenAI API
-  async callOpenAI(prompt) {
-    try {
-      const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-        model: 'gpt-3.5-turbo',
+      const completion = await this.openai.chat.completions.create({
+        model: 'gpt-4',
         messages: [
           {
             role: 'system',
-            content: 'You are a professional customer service representative responding to Google reviews. Be genuine, helpful, and maintain a positive brand image.'
+            content: `You are an AI assistant helping to respond to Google My Business reviews. Generate professional, personalized responses that reflect the business's values and maintain customer relationships.`
           },
           {
             role: 'user',
             content: prompt
           }
         ],
-        max_tokens: 200,
+        max_tokens: 500,
         temperature: 0.7
-      }, {
-        headers: {
-          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-          'Content-Type': 'application/json'
-        }
       });
 
-      return response.data.choices[0].message.content.trim();
+      const response = completion.choices[0]?.message?.content?.trim();
       
+      if (!response) {
+        throw new Error('No response generated from OpenAI');
+      }
+
+      return response;
+
     } catch (error) {
-      console.error('❌ OpenAI API error:', error.response?.data || error.message);
-      throw new Error('Failed to generate AI response');
+      console.error('❌ Error generating AI response:', error);
+      
+      // Return fallback response
+      return this.getFallbackResponse(review.starRating || 5);
     }
   }
 
-  // Post response to Google My Business API
-  async postResponseToGoogle(reviewName, responseText) {
-    try {
-      console.log('📤 Posting response to Google My Business...');
-      
-      // In production, this would make actual API call to Google
-      const googleResponse = await axios.put(
-        `https://mybusiness.googleapis.com/v4/${reviewName}/reply`,
-        {
-          comment: responseText
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${process.env.GOOGLE_ACCESS_TOKEN}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
+  // Build prompt for AI response generation
+  buildPrompt(review, location) {
+    const { businessInfo, tone, responseTemplate } = this.settings;
+    
+    return `
+Generate a ${tone} response to this Google My Business review:
 
-      console.log('✅ Response posted to Google successfully');
-      return googleResponse.data;
-      
-    } catch (error) {
-      console.error('❌ Error posting to Google:', error.response?.data || error.message);
-      throw new Error('Failed to post response to Google My Business');
-    }
+Business Information:
+- Name: ${businessInfo.name || location?.locationName || 'Our Business'}
+- Type: ${businessInfo.type || 'Business'}
+- Values: ${businessInfo.values || 'Customer satisfaction and quality service'}
+
+Review Details:
+- Rating: ${review.starRating}/5 stars
+- Comment: "${review.comment || 'No comment provided'}"
+- Reviewer: ${review.reviewer?.displayName || 'Anonymous'}
+
+Response Requirements:
+- Tone: ${tone}
+- Template: ${responseTemplate}
+- Length: 50-150 words
+- Professional and authentic
+- Address specific points mentioned in the review
+- Include gratitude for the feedback
+- Encourage future visits if appropriate
+
+Generate only the response text, no additional formatting or quotes.
+    `.trim();
   }
 
   // Get fallback response when AI fails
@@ -238,14 +333,54 @@ Response:`;
     return responses[rating] || responses[3];
   }
 
-  // Get processing status
+  // Log automation activity
+  logActivity(activity) {
+    console.log('📝 Automation Activity:', activity);
+    
+    // In production, save to database
+    // For now, just log to console
+  }
+
+  // Update automation settings
+  updateSettings(newSettings) {
+    this.settings = { ...this.settings, ...newSettings };
+    console.log('⚙️ Automation settings updated:', this.settings);
+    
+    // Restart if auto-respond was toggled on
+    if (newSettings.autoRespond && !this.isRunning) {
+      this.start(this.settings);
+    } else if (!newSettings.autoRespond && this.isRunning) {
+      this.stop();
+    }
+  }
+
+  // Get current status
   getStatus() {
     return {
-      isProcessing: this.isProcessing,
-      processedCount: this.processedReviews.size,
-      webhookStats: webhookService.getStats()
+      isRunning: this.isRunning,
+      settings: this.settings,
+      checkInterval: this.checkInterval,
+      processedReviewsCount: this.processedReviews.size,
+      googleAuthenticated: googleMyBusinessService.isAuth(),
+      openaiInitialized: !!this.openai
     };
+  }
+
+  // Manual review processing (for testing)
+  async processReviewManually(reviewData) {
+    try {
+      if (!this.openai) {
+        this.initializeOpenAI();
+      }
+
+      const response = await this.generateAIResponse(reviewData, { locationName: 'Test Location' });
+      return response;
+
+    } catch (error) {
+      console.error('❌ Error processing review manually:', error);
+      throw error;
+    }
   }
 }
 
-module.exports = new BackendAutomationService();
+module.exports = new AutomationService();

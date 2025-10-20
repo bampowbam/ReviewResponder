@@ -8,6 +8,9 @@ require('dotenv').config();
 
 const webhookRoutes = require('./routes/webhooks');
 const reviewRoutes = require('./routes/reviews');
+const credentialsRoutes = require('./routes/credentials');
+const googleRoutes = require('./routes/google');
+const automationRoutes = require('./routes/automation');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -30,12 +33,12 @@ app.use(limiter);
 // Logging
 app.use(morgan('combined'));
 
+// Raw body parser for webhook signature verification (must come before JSON parser)
+app.use('/api/webhooks', bodyParser.raw({ type: 'application/json' }));
+
 // Body parsing middleware
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
-
-// Raw body parser for webhook signature verification
-app.use('/api/webhooks', bodyParser.raw({ type: 'application/json' }));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -49,6 +52,9 @@ app.get('/health', (req, res) => {
 // API Routes
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/reviews', reviewRoutes);
+app.use('/api/credentials', credentialsRoutes);
+app.use('/api/google', googleRoutes);
+app.use('/api/automation', automationRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
