@@ -34,33 +34,50 @@ router.post('/auth/init', async (req, res) => {
 });
 
 // Handle OAuth callback (exchange code for tokens)
-router.post('/auth/callback', async (req, res) => {
+router.get('/callback', async (req, res) => {
   try {
-    const { code } = req.body;
+    const { code, error } = req.query;
+    
+    if (error) {
+      console.error('OAuth error:', error);
+      return res.redirect(`http://localhost:5173/?error=${encodeURIComponent(error)}`);
+    }
     
     if (!code) {
-      return res.status(400).json({ error: 'Authorization code is required' });
+      console.error('No authorization code provided');
+      return res.redirect('http://localhost:5173/?error=no_code');
     }
 
+    console.log('📝 Received OAuth callback with code:', code.substring(0, 20) + '...');
+
+    // Get stored credentials and ensure Google service is initialized
+    const credentials = credentialsRoutes.getCredentials();
+    
+    if (!credentials.googleClientId || !credentials.googleClientSecret) {
+      console.error('Google credentials not configured');
+      return res.redirect('http://localhost:5173/?error=no_credentials');
+    }
+
+    // Initialize Google service if not already done
+    await googleMyBusinessService.initialize(credentials);
+
     // Exchange code for tokens
-    const tokens = await googleMyBusinessService.getAccessToken(code);
+    const tokens = await googleMyBusinessService.exchangeCodeForTokens(code);
     
     // Store tokens securely (in production, encrypt and store in database)
     oauthTokens = tokens;
     
     console.log('✅ Google OAuth completed successfully');
     
-    res.json({ 
-      success: true, 
-      message: 'Successfully authenticated with Google My Business',
-      authenticated: true
-    });
+    // Redirect back to frontend with success
+    res.redirect('http://localhost:5173/?auth=success');
   } catch (error) {
     console.error('Error handling OAuth callback:', error);
-    res.status(500).json({ error: 'Failed to complete authentication' });
+    res.redirect(`http://localhost:5173/?error=${encodeURIComponent('Authentication failed')}`);
   }
 });
 
+// Get authentication status
 // Get authentication status
 router.get('/auth/status', (req, res) => {
   try {

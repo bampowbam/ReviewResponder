@@ -14,12 +14,14 @@ class GoogleMyBusinessService {
       this.oauth2Client = new OAuth2Client(
         credentials.googleClientId,
         credentials.googleClientSecret,
-        'http://localhost:5173/auth/callback' // Redirect URI
+        'http://localhost:3001/api/google/callback' // Redirect URI - backend handles OAuth callback
       );
 
-      // Note: Google My Business API is deprecated
-      // For now, we'll set up authentication and implement API calls separately
-      this.apiReady = true;
+      // Initialize Google My Business API
+      this.mybusiness = google.mybusinessbusinessinformation({
+        version: 'v1',
+        auth: this.oauth2Client
+      });
 
       console.log('✅ Google My Business service initialized');
       return true;
@@ -36,8 +38,7 @@ class GoogleMyBusinessService {
     }
 
     const scopes = [
-      'https://www.googleapis.com/auth/business.manage',
-      'https://www.googleapis.com/auth/plus.business.manage'
+      'https://www.googleapis.com/auth/business.manage'
     ];
 
     const authUrl = this.oauth2Client.generateAuthUrl({
@@ -50,9 +51,9 @@ class GoogleMyBusinessService {
   }
 
   // Exchange authorization code for tokens
-  async getAccessToken(code) {
+  async exchangeCodeForTokens(code) {
     try {
-      const { tokens } = await this.oauth2Client.getAccessToken(code);
+      const { tokens } = await this.oauth2Client.getToken(code);
       this.oauth2Client.setCredentials(tokens);
       this.isAuthenticated = true;
       
@@ -74,110 +75,223 @@ class GoogleMyBusinessService {
     this.isAuthenticated = true;
   }
 
-  // Get user's business accounts (mock implementation for now)
+  // Get user's business accounts (real API implementation)
   async getAccounts() {
     try {
       if (!this.isAuthenticated) {
         throw new Error('Not authenticated with Google');
       }
 
-      // Mock accounts for testing - replace with actual API call
       console.log('📋 Fetching Google My Business accounts...');
-      return [
-        {
-          name: 'accounts/123456789',
-          accountName: 'Test Business Account',
-          type: 'PERSONAL'
-        }
-      ];
+      
+      // Use Google My Business Business Information API
+      const response = await this.mybusiness.accounts.list();
+      
+      const accounts = response.data.accounts || [];
+      console.log(`✅ Found ${accounts.length} business accounts`);
+      
+      return accounts.map(account => ({
+        name: account.name,
+        accountName: account.accountName || 'Unnamed Business',
+        type: account.type || 'BUSINESS'
+      }));
     } catch (error) {
       console.error('❌ Error fetching accounts:', error);
+      
+      // If the new API fails, try the legacy approach
+      if (error.code === 404 || error.code === 403) {
+        console.log('📋 Trying legacy Google My Business API...');
+        try {
+          // Fallback to legacy mybusiness API
+          const legacyMybusiness = google.mybusiness({
+            version: 'v4',
+            auth: this.oauth2Client
+          });
+          
+          const response = await legacyMybusiness.accounts.list();
+          const accounts = response.data.accounts || [];
+          
+          return accounts.map(account => ({
+            name: account.name,
+            accountName: account.accountName || 'Unnamed Business',
+            type: account.type || 'BUSINESS'
+          }));
+        } catch (legacyError) {
+          console.error('❌ Legacy API also failed:', legacyError);
+          throw legacyError;
+        }
+      }
+      
       throw error;
     }
   }
 
-  // Get locations for an account (mock implementation for now)
+  // Get locations for an account (real API implementation)
   async getLocations(accountId) {
     try {
       if (!this.isAuthenticated) {
         throw new Error('Not authenticated with Google');
       }
 
-      // Mock locations for testing - replace with actual API call
       console.log(`📍 Fetching locations for account: ${accountId}`);
-      return [
-        {
-          name: 'accounts/123456789/locations/987654321',
-          locationName: 'Test Business Location',
-          primaryCategory: 'Restaurant',
-          address: 'Test Address'
-        }
-      ];
+      
+      // Use Google My Business Business Information API
+      const response = await this.mybusiness.accounts.locations.list({
+        parent: accountId
+      });
+      
+      const locations = response.data.locations || [];
+      console.log(`✅ Found ${locations.length} locations`);
+      
+      return locations.map(location => ({
+        name: location.name,
+        locationName: location.title || location.name,
+        primaryCategory: location.primaryCategory?.displayName || 'Business',
+        address: location.storefrontAddress?.formattedAddress || 'Address not available'
+      }));
     } catch (error) {
       console.error('❌ Error fetching locations:', error);
+      
+      // If the new API fails, try the legacy approach
+      if (error.code === 404 || error.code === 403) {
+        console.log('📍 Trying legacy Google My Business API...');
+        try {
+          const legacyMybusiness = google.mybusiness({
+            version: 'v4',
+            auth: this.oauth2Client
+          });
+          
+          const response = await legacyMybusiness.accounts.locations.list({
+            parent: accountId
+          });
+          
+          const locations = response.data.locations || [];
+          
+          return locations.map(location => ({
+            name: location.name,
+            locationName: location.locationName || 'Unnamed Location',
+            primaryCategory: location.primaryCategory?.displayName || 'Business',
+            address: location.address?.formattedAddress || 'Address not available'
+          }));
+        } catch (legacyError) {
+          console.error('❌ Legacy API also failed:', legacyError);
+          throw legacyError;
+        }
+      }
+      
       throw error;
     }
   }
 
-  // Get reviews for a location (mock implementation for now)
+  // Get reviews for a location (real API implementation)
   async getReviews(locationName, pageSize = 20) {
     try {
       if (!this.isAuthenticated) {
         throw new Error('Not authenticated with Google');
       }
 
-      // Mock reviews for testing - replace with actual API call
       console.log(`⭐ Fetching reviews for location: ${locationName}`);
-      return [
-        {
-          name: `${locationName}/reviews/review1`,
-          starRating: 5,
-          comment: 'Great service and food!',
-          createTime: new Date().toISOString(),
+      
+      // Try the Business Profile Performance API for reviews
+      try {
+        const businessProfileAPI = google.businessprofileperformance({
+          version: 'v1',
+          auth: this.oauth2Client
+        });
+        
+        const response = await businessProfileAPI.locations.searchkeywords.impressions.monthly.list({
+          parent: locationName
+        });
+        
+        console.log('📊 Business Profile Performance API response:', response.data);
+        
+        // This API doesn't directly give reviews, so we need to use a different approach
+        // Let's try the legacy API for reviews
+        throw new Error('Need to use legacy API for reviews');
+        
+      } catch (profileError) {
+        console.log('⭐ Trying legacy Google My Business API for reviews...');
+        
+        // Use legacy mybusiness API for reviews
+        const legacyMybusiness = google.mybusiness({
+          version: 'v4',
+          auth: this.oauth2Client
+        });
+        
+        const response = await legacyMybusiness.accounts.locations.reviews.list({
+          parent: locationName,
+          pageSize: pageSize
+        });
+        
+        const reviews = response.data.reviews || [];
+        console.log(`✅ Found ${reviews.length} reviews`);
+        
+        return reviews.map(review => ({
+          name: review.name,
+          starRating: review.starRating || 'STAR_RATING_UNSPECIFIED',
+          comment: review.comment || '',
+          createTime: review.createTime,
+          updateTime: review.updateTime,
           reviewer: {
-            displayName: 'Happy Customer'
-          }
-        }
-      ];
+            displayName: review.reviewer?.displayName || 'Anonymous',
+            profilePhotoUrl: review.reviewer?.profilePhotoUrl || ''
+          },
+          reviewReply: review.reviewReply ? {
+            comment: review.reviewReply.comment,
+            updateTime: review.reviewReply.updateTime
+          } : null
+        }));
+      }
     } catch (error) {
       console.error('❌ Error fetching reviews:', error);
       throw error;
     }
   }
 
-  // Reply to a review (mock implementation for now)
+  // Reply to a review (real API implementation)
   async replyToReview(reviewName, replyText) {
     try {
       if (!this.isAuthenticated) {
         throw new Error('Not authenticated with Google');
       }
 
-      // Mock reply posting - replace with actual API call
       console.log(`💬 Posting reply to review: ${reviewName}`);
       console.log(`📝 Reply text: "${replyText.substring(0, 100)}..."`);
       
-      // Simulate API delay
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Use legacy mybusiness API for review replies
+      const legacyMybusiness = google.mybusiness({
+        version: 'v4',
+        auth: this.oauth2Client
+      });
       
-      console.log('✅ Successfully replied to review (mock)');
-      return {
-        comment: replyText,
-        createTime: new Date().toISOString()
-      };
+      const response = await legacyMybusiness.accounts.locations.reviews.updateReply({
+        name: reviewName,
+        requestBody: {
+          comment: replyText
+        }
+      });
+      
+      console.log('✅ Successfully replied to review');
+      return response.data;
     } catch (error) {
       console.error('❌ Error replying to review:', error);
       throw error;
     }
   }
 
-  // Update an existing reply
+  // Update an existing reply (real API implementation)
   async updateReply(reviewName, replyText) {
     try {
       if (!this.isAuthenticated) {
         throw new Error('Not authenticated with Google');
       }
 
-      const response = await this.mybusiness.accounts.locations.reviews.updateReply({
+      const legacyMybusiness = google.mybusiness({
+        version: 'v4',
+        auth: this.oauth2Client
+      });
+
+      const response = await legacyMybusiness.accounts.locations.reviews.updateReply({
         name: reviewName,
         requestBody: {
           comment: replyText
@@ -192,14 +306,19 @@ class GoogleMyBusinessService {
     }
   }
 
-  // Delete a reply
+  // Delete a reply (real API implementation)
   async deleteReply(reviewName) {
     try {
       if (!this.isAuthenticated) {
         throw new Error('Not authenticated with Google');
       }
 
-      await this.mybusiness.accounts.locations.reviews.deleteReply({
+      const legacyMybusiness = google.mybusiness({
+        version: 'v4',
+        auth: this.oauth2Client
+      });
+
+      await legacyMybusiness.accounts.locations.reviews.deleteReply({
         name: reviewName
       });
 

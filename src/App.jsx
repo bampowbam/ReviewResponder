@@ -17,6 +17,7 @@ function App() {
     openaiConfigured: false,
     isConfigured: false
   });
+  const [dashboardKey, setDashboardKey] = useState(0); // Force dashboard refresh
 
   const [aiSettings, setAiSettings] = useState({
     tone: 'professional',
@@ -30,10 +31,31 @@ function App() {
     }
   });
 
-  // Check credentials status on mount
+  // Check credentials status on mount and handle OAuth callback
   useEffect(() => {
     checkCredentialsStatus();
+    handleOAuthCallback();
   }, []);
+
+  const handleOAuthCallback = () => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const authSuccess = urlParams.get('auth');
+    const authError = urlParams.get('error');
+    
+    if (authSuccess === 'success') {
+      console.log('✅ Google OAuth authentication successful');
+      // Show success message and refresh credentials
+      setTimeout(() => {
+        checkCredentialsStatus();
+        setDashboardKey(prev => prev + 1); // Force dashboard refresh
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }, 1000);
+    } else if (authError) {
+      console.error('❌ Google OAuth authentication failed:', authError);
+      // Show error message
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  };
 
   const checkCredentialsStatus = async () => {
     try {
@@ -96,6 +118,7 @@ function App() {
 
   const handleCredentialsSuccess = () => {
     checkCredentialsStatus();
+    setDashboardKey(prev => prev + 1); // Force dashboard refresh
   };
 
   return (
@@ -182,6 +205,7 @@ function App() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {activeTab === 'dashboard' && (
           <ReviewDashboard 
+            key={dashboardKey}
             reviews={reviews} 
             setReviews={setReviews} 
             aiSettings={aiSettings}

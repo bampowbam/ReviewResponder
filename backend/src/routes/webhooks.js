@@ -4,6 +4,60 @@ const router = express.Router();
 const webhookService = require('../services/webhookService');
 const automationService = require('../services/automationService');
 
+// Server-Sent Events endpoint for real-time notifications
+router.get('/stream', (req, res) => {
+  // Set headers for Server-Sent Events
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Cache-Control'
+  });
+
+  // Generate unique client ID
+  const clientId = `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  
+  console.log(`📡 SSE client connected: ${clientId}`);
+
+  // Send initial connection message
+  res.write(`data: ${JSON.stringify({
+    type: 'connection_established',
+    payload: {
+      clientId,
+      message: 'Real-time notifications active',
+      timestamp: new Date().toISOString()
+    }
+  })}\n\n`);
+
+  // Register client with webhook service (pass the response object directly)
+  webhookService.registerClient(clientId, res);
+
+  // Handle client disconnect
+  req.on('close', () => {
+    console.log(`📡 SSE client disconnected: ${clientId}`);
+    webhookService.connectedClients.delete(clientId);
+  });
+
+  // Keep connection alive with heartbeat
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`data: ${JSON.stringify({
+        type: 'heartbeat',
+        payload: { timestamp: new Date().toISOString() }
+      })}\n\n`);
+    } catch (error) {
+      clearInterval(heartbeat);
+      console.log(`💔 Heartbeat failed for client ${clientId}`);
+    }
+  }, 30000); // Every 30 seconds
+
+  // Clean up interval on disconnect
+  req.on('close', () => {
+    clearInterval(heartbeat);
+  });
+});
+
 // Middleware for webhook signature verification
 const verifyGoogleWebhook = (req, res, next) => {
   const signature = req.headers['x-goog-signature'];

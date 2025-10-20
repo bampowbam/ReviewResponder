@@ -1,10 +1,249 @@
 import React, { useState, useEffect } from 'react';
 import ReviewCard from './ReviewCard';
-import googleMyBusinessService from '../services/googleMyBusinessService';
+import googleService from '../services/googleService';
+import credentialsService from '../services/credentialsService';
+import webhookService from '../services/webhookService';
 
 const ReviewDashboard = ({ reviews, setReviews, aiSettings }) => {
   const [filter, setFilter] = useState('all');
   const [sortBy, setSortBy] = useState('newest');
+  const [connectedAccounts, setConnectedAccounts] = useState([]);
+  const [selectedAccount, setSelectedAccount] = useState(null);
+  const [selectedLocation, setSelectedLocation] = useState(null);
+  const [locations, setLocations] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState(null);
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(false);
+  const [showBusinessManager, setShowBusinessManager] = useState(false);
+  const [credentialsStatus, setCredentialsStatus] = useState({});
+  
+  // Real-time notifications
+  const [notifications, setNotifications] = useState([]);
+  const [isWebhookConnected, setIsWebhookConnected] = useState(false);
+
+  useEffect(() => {
+    checkSetupAndLoadData();
+    setupWebhookConnection();
+    
+    return () => {
+      // Cleanup webhook connection
+      webhookService.stopListening();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (autoRefreshEnabled && selectedLocation) {
+      const interval = setInterval(() => {
+        fetchReviews();
+      }, 30000); // Refresh every 30 seconds
+
+      return () => clearInterval(interval);
+    }
+  }, [autoRefreshEnabled, selectedLocation]);
+
+  const checkSetupAndLoadData = async () => {
+    try {
+      setIsLoading(true);
+      
+      // Check credentials status
+      const status = await credentialsService.getStatus();
+      setCredentialsStatus(status);
+
+      if (status.isConfigured) {
+        // Check Google auth status and load accounts
+        const authStatus = await googleService.getAuthStatus();
+        
+        if (authStatus.isAuthenticated) {
+          await loadConnectedAccounts();
+        }
+      }
+    } catch (error) {
+      console.error('Error checking setup:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Setup real-time webhook connection
+  const setupWebhookConnection = async () => {
+    try {
+      // Request notification permission
+      await webhookService.requestNotificationPermission();
+      
+      // Setup event listeners
+      webhookService.addEventListener('new_review', handleNewReview);
+      webhookService.addEventListener('automation_success', handleAutomationSuccess);
+      webhookService.addEventListener('automation_error', handleAutomationError);
+      
+      // Start listening for real-time events
+      webhookService.startListening();
+      setIsWebhookConnected(true);
+      
+      console.log('🔔 Real-time notifications enabled');
+    } catch (error) {
+      console.error('Error setting up webhook connection:', error);
+    }
+  };
+
+  // Handle real-time new review notification
+  const handleNewReview = (reviewData) => {
+    console.log('🆕 New review received in real-time:', reviewData);
+    
+    // Add notification
+    addNotification({
+      type: 'new_review',
+      title: `⭐ New ${reviewData.starRating}-star review!`,
+      message: `From: ${reviewData.reviewer?.displayName || 'Anonymous customer'}`,
+      timestamp: new Date().toISOString(),
+      data: reviewData
+    });
+    
+    // Refresh reviews if same location
+    if (selectedLocation && reviewData.locationName?.includes(selectedLocation)) {
+      fetchReviews();
+    }
+  };
+
+  // Handle automation success notification
+  const handleAutomationSuccess = (data) => {
+    console.log('✅ Automation success:', data);
+    
+    addNotification({
+      type: 'automation_success',
+      title: '🤖 AI Response Posted',
+      message: `Responded to ${data.reviewRating}⭐ review automatically`,
+      timestamp: new Date().toISOString(),
+      data
+    });
+  };
+
+  // Handle automation error notification
+  const handleAutomationError = (data) => {
+    console.error('❌ Automation error:', data);
+    
+    addNotification({
+      type: 'automation_error',
+      title: '⚠️ Automation Failed',
+      message: `Failed to respond to review: ${data.error}`,
+      timestamp: new Date().toISOString(),
+      data
+    });
+  };
+
+  // Add notification to state
+  const addNotification = (notification) => {
+    setNotifications(prev => [notification, ...prev.slice(0, 9)]); // Keep last 10
+    
+    // Auto-remove notification after 10 seconds
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.timestamp !== notification.timestamp));
+    }, 10000);
+  };
+
+  // Test webhook functionality
+  const testWebhook = () => {
+    webhookService.simulateWebhook('new_review', {
+      reviewId: 'test_123',
+      starRating: 5,
+      reviewer: { displayName: 'Test Customer' },
+      comment: 'This is a test notification!',
+      createTime: new Date().toISOString(),
+      business: { name: selectedLocation || 'Test Business' }
+    });
+  };
+
+  const loadConnectedAccounts = async () => {
+    try {
+      const accountsData = await googleService.getAccounts();
+      setConnectedAccounts(accountsData.accounts || []);
+      
+      if (accountsData.accounts?.length > 0 && !selectedAccount) {
+        const firstAccount = accountsData.accounts[0];
+        setSelectedAccount(firstAccount);
+        await loadLocationsForAccount(firstAccount.name);
+      }
+    } catch (error) {
+      console.error('Error loading accounts:', error);
+    }
+  };
+
+  const loadLocationsForAccount = async (accountId) => {
+    try {
+      const locationsData = await googleService.getLocations(accountId);
+      setLocations(locationsData.locations || []);
+      
+      if (locationsData.locations?.length > 0 && !selectedLocation) {
+        const firstLocation = locationsData.locations[0];
+        setSelectedLocation(firstLocation);
+        await fetchReviews();
+      }
+    } catch (error) {
+      console.error('Error loading locations:', error);
+    }
+  };
+
+  const fetchReviews = async () => {
+    if (!selectedLocation) return;
+    
+    try {
+      setIsLoading(true);
+      const reviewsData = await googleService.getReviews(selectedLocation.name);
+      
+      // Transform Google reviews to our format
+      const transformedReviews = reviewsData.reviews?.map(review => ({
+        id: review.name,
+        rating: review.starRating || 0,
+        reviewer: review.reviewer?.displayName || 'Anonymous',
+        date: review.createTime || new Date().toISOString(),
+        text: review.comment || '',
+        responded: !!review.reply,
+        aiResponse: review.reply?.comment || null
+      })) || [];
+      
+      setReviews(transformedReviews);
+      setLastRefresh(new Date());
+      
+      console.log(`📊 Fetched ${transformedReviews.length} reviews from ${selectedLocation.locationName}`);
+    } catch (error) {
+      console.error('Error fetching reviews:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleAccountChange = async (account) => {
+    setSelectedAccount(account);
+    setSelectedLocation(null);
+    setLocations([]);
+    setReviews([]);
+    await loadLocationsForAccount(account.name);
+  };
+
+  const handleLocationChange = async (location) => {
+    setSelectedLocation(location);
+    setReviews([]);
+    await fetchReviews();
+  };
+
+  const handleDisconnect = async () => {
+    try {
+      // Reset all state
+      setConnectedAccounts([]);
+      setSelectedAccount(null);
+      setSelectedLocation(null);
+      setLocations([]);
+      setReviews([]);
+      setShowBusinessManager(false);
+      
+      // Note: In a real implementation, you'd revoke tokens here
+      console.log('🔓 Disconnected from Google My Business');
+      
+      // Refresh credentials status
+      await checkSetupAndLoadData();
+    } catch (error) {
+      console.error('Error disconnecting:', error);
+    }
+  };
 
   const getFilteredReviews = () => {
     let filtered = reviews;
@@ -43,6 +282,196 @@ const ReviewDashboard = ({ reviews, setReviews, aiSettings }) => {
 
   return (
     <div className="space-y-6">
+      {/* Real-time Notifications */}
+      {notifications.length > 0 && (
+        <div className="fixed top-4 right-4 z-50 space-y-2">
+          {notifications.slice(0, 3).map((notification, index) => (
+            <div
+              key={notification.timestamp}
+              className={`max-w-sm p-4 rounded-lg shadow-lg border-l-4 ${
+                notification.type === 'new_review' 
+                  ? 'bg-blue-50 border-blue-400'
+                  : notification.type === 'automation_success'
+                  ? 'bg-green-50 border-green-400'
+                  : 'bg-red-50 border-red-400'
+              }`}
+            >
+              <div className="font-medium text-gray-900">{notification.title}</div>
+              <div className="text-sm text-gray-600">{notification.message}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Business Management Header */}
+      {credentialsStatus.isConfigured && (
+        <div className="bg-white p-6 rounded-lg shadow-sm border">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center space-y-4 sm:space-y-0">
+            <div className="flex items-center space-x-4">
+              <div className="flex items-center space-x-3">
+                <div className="p-2 bg-green-100 rounded-lg">
+                  <svg className="w-5 h-5 text-green-600" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                  </svg>
+                </div>
+                <div>
+                  {selectedAccount ? (
+                    <>
+                      <h3 className="font-semibold text-gray-900">
+                        {selectedAccount.accountName || 'Connected Business'}
+                      </h3>
+                      {selectedLocation && (
+                        <p className="text-sm text-gray-500">
+                          📍 {selectedLocation.locationName || selectedLocation.name}
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <div>
+                      <h3 className="font-semibold text-gray-900">No Business Connected</h3>
+                      <p className="text-sm text-gray-500">Connect your Google My Business account</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+              
+              {lastRefresh && (
+                <div className="text-xs text-gray-400">
+                  Last updated: {lastRefresh.toLocaleTimeString()}
+                </div>
+              )}
+            </div>
+            
+            <div className="flex items-center space-x-3">
+              {selectedLocation && (
+                <>
+                  <button
+                    onClick={() => setAutoRefreshEnabled(!autoRefreshEnabled)}
+                    className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                      autoRefreshEnabled 
+                        ? 'bg-green-100 text-green-800' 
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    }`}
+                  >
+                    {autoRefreshEnabled ? '🔄 Auto-refresh ON' : '🔄 Auto-refresh OFF'}
+                  </button>
+                  
+                  <button
+                    onClick={fetchReviews}
+                    disabled={isLoading}
+                    className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 transition-colors text-xs font-medium disabled:opacity-50"
+                  >
+                    {isLoading ? '↻ Refreshing...' : '↻ Refresh Reviews'}
+                  </button>
+                  
+                  <div className="flex items-center space-x-2">
+                    <div className={`px-2 py-1 rounded-full text-xs ${
+                      isWebhookConnected ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+                    }`}>
+                      {isWebhookConnected ? '🔔 Live' : '⏸️ Offline'}
+                    </div>
+                    
+                    <button
+                      onClick={testWebhook}
+                      className="bg-purple-600 text-white px-3 py-1 rounded-lg hover:bg-purple-700 transition-colors text-xs font-medium"
+                    >
+                      🧪 Test
+                    </button>
+                  </div>
+                </>
+              )}
+              
+              <button
+                onClick={() => setShowBusinessManager(!showBusinessManager)}
+                className="border border-gray-300 text-gray-700 px-3 py-1 rounded-lg hover:bg-gray-50 transition-colors text-xs font-medium"
+              >
+                ⚙️ Manage Businesses
+              </button>
+            </div>
+          </div>
+          
+          {/* Business Manager Panel */}
+          {showBusinessManager && (
+            <div className="mt-4 pt-4 border-t border-gray-200">
+              <h4 className="font-medium text-gray-900 mb-3">Business Management</h4>
+              
+              {connectedAccounts.length > 0 ? (
+                <div className="space-y-3">
+                  {/* Account Selection */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Select Business Account
+                    </label>
+                    <select
+                      value={selectedAccount?.name || ''}
+                      onChange={(e) => {
+                        const account = connectedAccounts.find(acc => acc.name === e.target.value);
+                        if (account) handleAccountChange(account);
+                      }}
+                      className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full max-w-md"
+                    >
+                      {connectedAccounts.map(account => (
+                        <option key={account.name} value={account.name}>
+                          {account.accountName || account.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  
+                  {/* Location Selection */}
+                  {locations.length > 0 && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Select Location
+                      </label>
+                      <select
+                        value={selectedLocation?.name || ''}
+                        onChange={(e) => {
+                          const location = locations.find(loc => loc.name === e.target.value);
+                          if (location) handleLocationChange(location);
+                        }}
+                        className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full max-w-md"
+                      >
+                        {locations.map(location => (
+                          <option key={location.name} value={location.name}>
+                            {location.locationName || location.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  
+                  <div className="flex space-x-2 pt-2">
+                    <button
+                      onClick={handleDisconnect}
+                      className="bg-red-600 text-white px-3 py-1 rounded-lg hover:bg-red-700 transition-colors text-xs font-medium"
+                    >
+                      🔓 Disconnect
+                    </button>
+                    <button
+                      onClick={() => setShowBusinessManager(false)}
+                      className="border border-gray-300 text-gray-700 px-3 py-1 rounded-lg hover:bg-gray-50 transition-colors text-xs font-medium"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-4">
+                  <p className="text-gray-500 mb-3">No businesses connected</p>
+                  <button
+                    onClick={() => window.location.reload()}
+                    className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                  >
+                    🔗 Connect Google My Business
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Stats Overview */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
         <div className="bg-white p-6 rounded-lg shadow-sm border">

@@ -169,7 +169,8 @@ const CredentialsModal = ({ isOpen, onClose, onSuccess }) => {
                 <li>Go to <strong>APIs & Services → Credentials</strong></li>
                 <li>Create <strong>OAuth 2.0 Client IDs</strong> credentials</li>
                 <li>Set the application type to <strong>Web application</strong></li>
-                <li>Add <code>http://localhost:5173</code> to authorized origins</li>
+                <li>Add <code>http://localhost:3001</code> to authorized origins</li>
+                <li>Add <code>http://localhost:3001/api/google/callback</code> to authorized redirect URIs</li>
                 <li>Copy your Client ID and Client Secret</li>
               </ol>
             </div>

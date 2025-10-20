@@ -12,9 +12,9 @@ class WebhookService extends EventEmitter {
     };
   }
 
-  // Register a frontend client for real-time notifications
-  registerClient(clientId, websocket) {
-    this.connectedClients.set(clientId, websocket);
+  // Register a frontend client for real-time notifications (SSE)
+  registerClient(clientId, res) {
+    this.connectedClients.set(clientId, res);
     console.log(`📱 Client ${clientId} connected for real-time notifications`);
     
     // Send current stats to new client
@@ -24,9 +24,14 @@ class WebhookService extends EventEmitter {
     });
 
     // Handle client disconnect
-    websocket.on('close', () => {
+    res.on('close', () => {
       this.connectedClients.delete(clientId);
       console.log(`📱 Client ${clientId} disconnected`);
+    });
+
+    res.on('error', (error) => {
+      console.error(`❌ SSE error for client ${clientId}:`, error);
+      this.connectedClients.delete(clientId);
     });
   }
 
@@ -59,15 +64,16 @@ class WebhookService extends EventEmitter {
     }
   }
 
-  // Send message to specific client
+  // Send message to specific client (SSE)
   sendToClient(clientId, eventType, data) {
     try {
-      const websocket = this.connectedClients.get(clientId);
-      if (websocket && websocket.readyState === 1) { // WebSocket.OPEN
-        websocket.send(JSON.stringify({
+      const res = this.connectedClients.get(clientId);
+      if (res && !res.destroyed && res.writable) {
+        const sseData = `data: ${JSON.stringify({
           type: eventType,
           data: data
-        }));
+        })}\n\n`;
+        res.write(sseData);
       }
     } catch (error) {
       console.error(`❌ Error sending to client ${clientId}:`, error);
